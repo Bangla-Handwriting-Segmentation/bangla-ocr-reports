@@ -1,0 +1,441 @@
+\documentclass[10pt]{article}
+
+\usepackage[a4paper,margin=0.85in]{geometry}
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage{amsmath,amssymb}
+\usepackage{booktabs}
+\usepackage{float}
+\usepackage{xcolor}
+\usepackage{enumitem}
+\usepackage[protrusion=true,expansion=false]{microtype}
+\usepackage{hyperref}
+\hypersetup{colorlinks=true,linkcolor=blue!50!black,citecolor=blue!50!black,urlcolor=blue!50!black}
+\setlength{\parskip}{0.32em}
+\setlength{\parindent}{0pt}
+\setlength{\emergencystretch}{2.5em}
+
+\newcommand{\swin}{\textbf{Swin}}
+\newcommand{\bnd}{\textbf{BN-DRISHTI}}
+
+\newcommand{\keynote}[1]{%
+\begin{center}
+\fbox{\begin{minipage}{0.95\linewidth}
+\vspace{2pt}\small#1\vspace{2pt}
+\end{minipage}}
+\end{center}
+}
+
+\title{\textbf{\large Benchmarking a Polygon-Output Swin--Mask R-CNN Segmentation Pipeline
+Against Rectangle-Annotated Bengali HTR Baselines}\\[2pt]
+\normalsize Executive Summary Report --- Three-Dataset Results\\[1pt]
+\footnotesize (Condensed from the full technical report; figures and inference-image
+galleries omitted, all numbers identical)}
+\author{OCR Pipeline Benchmarking Report}
+\date{September 2026}
+
+\begin{document}
+\maketitle
+\vspace{-1.5em}
+
+\begin{abstract}
+\noindent We benchmark our Swin/Mask R-CNN pipeline (polygon output) against \bnd{}
+\cite{jubaer2023bndrishti} (YOLOv5, rectangle output) on three datasets using a
+literature-derived, format-agnostic protocol \cite{wolf2006detEval}. \swin{} wins
+decisively on synthetic data, its own training domain (word F1 0.915 vs.\ 0.684);
+\bnd{} wins on real BN-HTRd, its training domain; and \swin{} still wins on
+BanglaWriting, ground neither system trained on (word F1 0.770 vs.\ 0.674). The
+result is dataset-conditional, not a single winner. \bnd's edge on strict mAP@75 is
+separately shown to be a rectangle-vs-polygon scoring artifact, not a real accuracy
+gap.
+\end{abstract}
+
+\section*{At-a-Glance: All Three Datasets}
+
+\begin{table}[H]
+\centering
+\footnotesize
+\begin{tabular}{@{}llrrrr@{}}
+\toprule
+Dataset & Task/System & F1 & mAP@50 & mAP@75 & mAP \\
+\midrule
+Synthetic (\texttt{syn-hw}) & Line -- \bnd{}       & 0.776 & 0.508 & \textbf{0.209} & 0.239 \\
+\emph{(\swin's home turf)} & Line -- \textbf{Swin}  & \textbf{0.893} & \textbf{0.804} & 0.091 & \textbf{0.272} \\
+ & Word -- \bnd{}        & 0.684 & 0.318 & \textbf{0.172} & 0.168 \\
+ & Word -- \textbf{Swin}  & \textbf{0.915} & \textbf{0.688} & 0.037 & \textbf{0.214} \\
+\midrule
+Real (BN-HTRd) & Line -- \textbf{\bnd{}}        & \textbf{0.989} & \textbf{0.989} & \textbf{0.973} & \textbf{0.813} \\
+\emph{(\bnd's home turf)} & Line -- Swin           & 0.903 & 0.865 & 0.343 & 0.426 \\
+          & Word -- \textbf{\bnd{}}        & \textbf{0.685} & \textbf{0.432} & \textbf{0.420} & \textbf{0.362} \\
+          & Word -- Swin           & 0.669 & 0.263 & 0.001 & 0.050 \\
+\midrule
+Neutral (BanglaWriting) & Word -- \bnd{}        & 0.674 & \textbf{0.500} & \textbf{0.083} & \textbf{0.186} \\
+\emph{(foreign to both)} & Word -- \textbf{Swin}  & \textbf{0.770} & 0.002 & 0.000 & 0.000 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\keynote{\textbf{F1 is the headline metric in every table below} (Wolf \& Jolion
+split-merge matching \cite{wolf2006detEval}, the ICDAR/DetEval standard); mAP@50/75/mAP
+are reported for completeness only and are known to be unreliable for word-level
+detection (small-box IoU sensitivity, plus one-to-one matching penalizing legitimate
+split/merge detections as false positives -- footnote below). No single dataset row is
+``the'' answer either: the two home-turf datasets each answer ``which system is better
+\emph{on its own} training distribution''; only the neutral BanglaWriting row
+approximates ``which system generalizes better.'' Read together: \swin{} is the
+stronger raw detector in two of three conditions (including the unconfounded one), but
+loses decisively on mask-mode mAP@75 everywhere real, non-synthetic ground truth is
+used, for a geometric reason explained in Section~3.}
+
+\section{Introduction and the Training-Domain Confound}
+
+Our pipeline (Swin Transformer backbone, hierarchical Mask R-CNN, page$\to$line
+$\to$word$\to$grapheme cascade) emits a 50-point directional polygon per instance,
+closely tracing the true slant and curvature of handwritten Bengali text. \bnd{}
+\cite{jubaer2023bndrishti} and the BN-HTRd dataset it extends \cite{rahman2022bnhtrd}
+instead represent every line/word as an axis-aligned rectangle. A naive
+rectangle-vs-rectangle IoU cannot score our polygon predictions without either erasing
+their shape information (bbox reduction) or inventing an unprecedented ad hoc
+comparison, so Section~2 adopts a literature-grounded, format-agnostic protocol.
+
+\textbf{The training-domain confound.} \swin{} was trained \emph{exclusively} on the
+synthetic \texttt{syn-hw} corpus; \bnd{} was trained \emph{exclusively} on the real
+BN-HTRd corpus. Neither system has ever seen the other's training distribution. This
+means a \texttt{syn-hw} benchmark is simultaneously an in-domain test for \swin{} and
+an out-of-domain generalization test for \bnd{}, and the real-BN-HTRd benchmark is
+exactly reversed -- neither alone is a neutral referee on ``which detector is
+generally better.'' We therefore report \emph{three} datasets side by side: the two
+home-turf corpora, plus BanglaWriting \cite{mridha2021banglawriting}, a third,
+independent corpus neither system has ever trained on, added specifically to settle
+the generalization question the first two cannot.
+
+\section{Literature Review and Adopted Protocol}
+
+We searched arXiv, IEEE Xplore, Springer Link, ACM DL, CVF Open Access, Semantic
+Scholar, DBLP, and the Robust Reading Competition portal for methodology reconciling
+polygon/quadrilateral/rectangle detection geometries under one evaluation protocol.
+Twenty-six sources were retained. Two mechanisms recur: (1) Wolf \& Jolion's
+object count/area \emph{split/merge} matching \cite{wolf2006detEval}, the basis of
+``DetEval'' used in early ICDAR Robust Reading Competitions
+\cite{shahab2011icdar2011,karatzas2013icdar2013,karatzas2015icdar2015}, which credits
+a detection against several ground-truth regions once area-coverage constraints are
+jointly satisfied ($\gtrsim$0.4 per-region, $\gtrsim$0.8 total), directly addressing
+line/word granularity mismatches between cascaded models; and (2) rasterizing both
+sides to a shared pixel-mask canvas and scoring pixel IoU, exactly as COCO's
+\texttt{iou\_type="segm"} \cite{lin2014coco} and DIVA-HisDB \cite{simistira2017divahisdb}
+do, sidestepping the polygon/rectangle format mismatch entirely. Total-Text
+\cite{chng2017totaltext,chng2020totaltext} independently establishes polygon-native
+ground truth for curved scene text, and Tightness-Aware IoU \cite{liu2019tiou} warns
+that a single IoU threshold can conflate localization quality with shape-format
+agreement -- a caution central to Section~3. Document layout analysis (PubLayNet
+\cite{zhong2019publaynet}, DocLayNet \cite{pfitzmann2022doclaynet}, FUNSD
+\cite{jaume2019funsd}) and the ICDAR Robust Reading lineage converge on P/R/F1 at
+IoU$\geq$0.5 as the primary bar, with COCO-style mAP@50/75/mAP as secondary, stricter
+numbers -- a convention we adopt. Critically, \emph{no} Bengali/Indic HTR paper
+surveyed (BN-HTRd, \bnd{}, BanglaWriting, PHDIndic\_11 \cite{obaidullah2018phdindic11})
+defines a protocol for comparing a rectangle-output system against a polygon-output
+one; this report's methodology appears to be a first for the Bengali OCR space.
+
+\textbf{Adopted protocol:} (i) implement Wolf \& Jolion split/merge matching
+\cite{wolf2006detEval} underneath a strict greedy IoU$\geq$0.5 matcher and treat the
+resulting P/R/F1 as this report's \textbf{headline metric}, so line/word granularity
+mismatches do not silently inflate false positives/negatives; (ii) rasterize every
+prediction/ground-truth region onto a shared downscaled canvas (768\,px longest side)
+and score COCO-style mask mAP, so \swin's polygons are never penalized merely for not
+being rectangles, reported alongside for completeness; (iii) additionally report
+vector box-IoU mAP as a sanity check. For a pure rectangle-vs-rectangle case (\bnd{}
+vs.\ ground truth), box-mode and mask-mode agree to within 1--2\%, confirming the
+rasterization pipeline introduces no bias before it is trusted for the genuinely
+mismatched polygon case.
+
+\textbf{Why F1 leads and mAP follows.}\footnote{Full derivation and a consolidated mAP
+reference table: Appendix A of the companion full technical report
+(\texttt{report/benchmark\_report.tex}).} COCO mAP was built for generic object
+detection, not small, densely-packed word boxes: IoU is a relative-area measure, so a
+$\sim$30--60\,px word box swings sharply in IoU from sub-visual pixel misalignment, and
+strict one-to-one matching scores every extra overlapping detection as a flat false
+positive -- collapsing precision-driven AP whenever a system legitimately splits one
+word into several correct sub-boxes, exactly the case split/merge matching handles
+correctly instead (Table~1 above: switching \bnd{} from strict to split-merge matching
+raises word F1 from 0.487 to 0.684 with \emph{no change to the underlying
+predictions}). CLEval's character-level scoring \cite{baek2020cleval} and
+Tightness-Aware IoU \cite{liu2019tiou} are further literature metrics purpose-built for
+this exact setting; both are computed for BanglaWriting (Section~6) and pending for
+\texttt{syn-hw}/BN-HTRd, with fuller detail in the companion full report.
+
+\section{Part I: Synthetic Corpus (\texttt{syn-hw}) Results}
+
+\texttt{syn-hw} is a synthetic handwritten Bengali page corpus (60{,}454 pages total,
+6{,}045-page held-out validation split used here; 118{,}103 lines / 520{,}012 words in
+that split), each page mixing several distinct synthetic handwriting fonts. Ground
+truth is a bounding-box reduction of a native, pixel-precise 50-point ink-tracing
+polygon -- computed specifically to match BN-HTRd/\bnd's own rectangle convention, not
+because finer ground truth is unavailable. This is precisely why the rectangle ground
+truth contains the ``empty margin'' quantified in Section~3.
+
+Split-merge matching materially changes \bnd's own scores versus strict one-to-one
+matching (word F1 0.487$\to$0.684, line F1 0.690$\to$0.776), confirming granularity
+mismatches are common; mAP is unaffected since \texttt{MeanAveragePrecision} performs
+its own internal one-to-many ranking. The full three-way comparison (both systems vs.\
+ground truth, split-merge matching, mask-mode IoU, 6{,}045 pages, 2.53\,h on one
+RTX~5090):
+
+\begin{table}[H]
+\centering
+\footnotesize
+\caption{Full \texttt{syn-hw} validation split. F1 = headline metric; mAP reported for
+completeness only.}
+\begin{tabular}{@{}llrrrrrr@{}}
+\toprule
+Task & System & P & R & F1 & mAP@50 & mAP@75 & mAP \\
+\midrule
+Line & \bnd{}     & 0.897 & 0.684 & 0.776 & 0.508 & \textbf{0.209} & 0.239 \\
+Line & \textbf{Swin} & 0.858 & \textbf{0.931} & \textbf{0.893} & \textbf{0.804} & 0.091 & \textbf{0.272} \\
+Word & \bnd{}     & 0.546 & 0.916 & 0.684 & 0.318 & \textbf{0.172} & 0.168 \\
+Word & \textbf{Swin} & 0.858 & \textbf{0.979} & \textbf{0.915} & \textbf{0.688} & 0.037 & \textbf{0.214} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\swin{} wins F1 by 11.7/23.1 points and mAP@50 by 29.6/37.0 points (line/word), driven
+by much higher recall at comparable precision. The one metric \bnd{} wins is mAP@75,
+investigated next.
+
+\section{Why Is BN-DRISHTI's mAP@75 Higher? (Investigation and Proof)}
+
+A dedicated multi-stage investigation ruled out artifact explanations before accepting
+a geometric one. \textbf{Resolution is not the cause}: mean matched-pair IoU is flat
+across a $\sim$8$\times$ canvas-resolution sweep (384\,px to native $2480\times3510$)
+for both systems, including at zero downscale. \textbf{Rasterization is not the
+cause}: \texttt{cv2.fillPoly}'s rasterized pixel count agrees with the exact
+shoelace-formula polygon area to within 1\% (mean ratio 0.991, $n=32$, zero malformed
+polygons). \textbf{Box-mode reduction flips the ordering entirely in \swin's favor}
+(reducing its polygon to its own bounding box turns the comparison into pure detection
+confidence, where \swin{} is simply stronger) -- and a real handwritten line's tight
+\swin{} polygon covers on average only 73.4\% of its own enclosing rectangle
+(55.9--96.4\%, $n=32$).
+
+To make the mechanism fully concrete and independent of either model's own geometry,
+we Otsu-thresholded \cite{otsu1979threshold} the \emph{source page images} inside
+every matched ground-truth box (60-page sample) to separate true ink pixels $I$ from
+background/margin $M$. For matched prediction $P$: \emph{ink recall} $=|P\cap I|/|I|$
+and \emph{background coverage} $=|P\cap M|/|M|$ -- a purely pixel-intensity measurement
+using neither model's prediction as ground truth.
+
+\begin{table}[H]
+\centering
+\footnotesize
+\caption{Independent pixel-level ink/margin decomposition (60-page sample).}
+\begin{tabular}{@{}llrrr@{}}
+\toprule
+Task & System & Ink recall & Bg.\ coverage & $n$ \\
+\midrule
+Line & \bnd{}         & 0.958 & \textbf{0.857} & 1{,}180 \\
+Line & \textbf{Swin} & 0.933 & 0.670 & 1{,}177 \\
+Word & \bnd{}         & 0.988 & \textbf{0.979} & 6{,}363 \\
+Word & \textbf{Swin} & 0.975 & 0.576 & 6{,}489 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Both systems recall real ink at a comparable, high rate (0.933--0.988): neither is
+meaningfully ``missing'' text. The gap is entirely in background coverage --
+\bnd's rectangle claims 85.7\%/97.9\% of each box's empty margin vs.\ \swin's
+67.0\%/57.6\% -- the exact per-pixel mechanism behind the mAP@75 gap. A further
+check: only 8.2\%/20.9\% (line/word) of a typical ground-truth box is actually ink, so
+a hypothetically perfect ink-tight detector is structurally capped near IoU
+$\approx$0.08 for lines -- strikingly close to \swin's observed line mAP@75 of 0.091.
+\textbf{Verdict: mAP@75 under rectangle-only ground truth measures how
+rectangle-shaped a prediction is, not how accurate it is}; mAP@50, split-merge P/R/F1,
+and box-mode's own ordering are the metrics we recommend trusting, and \swin{} wins
+clearly on all of them, for the right reasons.
+
+\section{Part II: Real Corpus (BN-HTRd) Results}
+
+\bnd's own paper reports headline numbers on real, photographed handwriting, so we
+locate the actual extended BN-HTRd (v4.0) dataset already present locally
+(\texttt{BN\_HTR/}, 3.0\,GB) and run the identical protocol on it. \textbf{Reading
+\cite{jubaer2023bndrishti} directly}: its headline 99.97\%(line)/98\%(word) F-scores
+are computed by \emph{manual visual comparison} (``Qualitative'' evaluation), not an
+automated IoU protocol; its own automated (``Quantitative'') evaluation scores only
+94.09\%(line)/16.0\%(word, hurt by a disclosed skew-correction coordinate bug), and
+the paper candidly states this word evaluation ``does not do justice'' to the system.
+Neither of \bnd's own two numbers is therefore directly comparable to our fully
+automated protocol without this context.
+
+The corpus contains 786 real pages/150 writers (matching the paper's reported 786
+pages/14{,}383 lines); we use an existing writer-disjoint split whose test set (84
+pages, 1{,}444 line boxes) is comparable in scale to the paper's own 75-image test set.
+Word-level ground truth is only annotated per line crop, so we reconstruct 10{,}238
+page-level word boxes by offsetting each line crop's word boxes by its line box's own
+origin (verified exact via crop-dimension matching).
+
+\begin{table}[H]
+\centering
+\footnotesize
+\caption{Real BN-HTRd, 84-page test split, identical protocol. F1 = headline metric;
+mAP reported for completeness only.}
+\begin{tabular}{@{}llrrrrrr@{}}
+\toprule
+Task & System & P & R & F1 & mAP@50 & mAP@75 & mAP \\
+\midrule
+Line & \textbf{\bnd{}} & 0.978 & \textbf{0.999} & \textbf{0.989} & \textbf{0.989} & \textbf{0.973} & \textbf{0.813} \\
+Line & Swin & 0.877 & 0.930 & 0.903 & 0.865 & 0.343 & 0.426 \\
+Word & \bnd{}     & 0.524 & \textbf{0.988} & \textbf{0.685} & \textbf{0.432} & \textbf{0.420} & \textbf{0.362} \\
+Word & Swin & \textbf{0.828} & 0.561 & 0.669 & 0.263 & 0.001 & 0.050 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\bnd{} wins decisively on lines and edges ahead on words. \swin{} keeps a real
+strength (word precision 0.828 vs.\ 0.524) but its recall collapses to 0.561 (vs.\
+0.979 on synthetic data) -- it simply misses much real handwritten text. Our
+automated reproduction gives \bnd{} a line F1 of 98.87\% (between the paper's own
+94.09\% automated and 99.97\% manual figures) and word F1 of 68.52\% (far above the
+paper's flawed 16.0\% automated figure but below its manual 98\%) -- evidence our
+reproduction is methodologically sound. This is a textbook synthetic-to-real domain
+gap: \swin{} was trained only on synthetic renders and never saw a real photographed
+page, while \bnd{} was trained directly on this real corpus; it does not overturn Part
+I, it contextualizes it.
+
+\section{Part III: Neutral Corpus (BanglaWriting) Results}
+
+Both results above are confounded by training data. To answer ``which detector
+generalizes better'' directly, we benchmark on BanglaWriting
+\cite{mridha2021banglawriting}: 260 single-page documents, 260 different writers, 52
+scanner-digitized + 208 smartphone-photographed under real lighting, 21{,}234
+manually-annotated word boxes -- \textbf{a corpus neither system has ever trained on}.
+BanglaWriting carries no official line-level ground truth (only words), and rather
+than fabricate line ground truth by heuristically clustering words -- our own derived
+ground truth, not an independently verifiable one -- we score the word task only,
+across all 260 pages.
+
+\begin{table}[H]
+\centering
+\footnotesize
+\caption{Word task, BanglaWriting (260 pages, neutral for both systems). F1 = headline
+metric; mAP reported for completeness only and especially unreliable here (Section~5).}
+\begin{tabular}{@{}lrrrrrr@{}}
+\toprule
+System & P & R & F1 & mAP@50 & mAP@75 & mAP \\
+\midrule
+\bnd{}         & 0.530 & \textbf{0.924} & 0.674 & \textbf{0.500} & \textbf{0.083} & \textbf{0.186} \\
+\textbf{Swin} & \textbf{0.790} & 0.752 & \textbf{0.770} & 0.002 & 0.000 & 0.000 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\textbf{On data neither system has trained on, \swin{} still wins word-task F1}
+(0.770 vs.\ 0.674), driven by much higher precision at somewhat lower recall than
+\bnd{} -- a real, if narrower, win than its 59-point synthetic-data margin, not a tie
+and not a reversal. mAP again collapses for \swin{} in mask mode (0.002 mAP@50) while
+its box-mode mAP@50 stays respectable (0.353, close to \bnd's 0.500) -- confirmed via
+a direct, pipeline-independent rasterized IoU check (172 matched instances): \swin's
+mean polygon-vs-rectangle mask IoU is only 0.32--0.34 (0--1.2\% clearing 0.5) while its
+box-mode IoU averages 0.51--0.57 (56--73\% clearing 0.5). This is the same mechanism
+as Section~3, \emph{more pronounced} here because BanglaWriting's human-drawn boxes
+carry more margin than \texttt{syn-hw}'s ink-derived ones -- independent confirmation
+the mAP@75 effect is dataset-general, not specific to \texttt{syn-hw}'s ground-truth
+construction.
+
+\textbf{Literature cross-check (CLEval).}\footnote{Run via the official,
+unmodified-algorithm upstream implementation \cite{baek2020cleval}; a small third-party
+bug (a missing attribute in CLEval's polygon box type) had to be patched to run correctly
+on our polygon predictions -- an upstream implementation bug, not an adjustment to our
+data. TIoU \cite{liu2019tiou} was also run on BanglaWriting but is not reported as a
+system comparison here: it gates its continuous tightness score behind a hard
+IoU$\geq$0.5 base match, and \swin's raw ink-tracing polygon mostly fails that gate
+against BanglaWriting's box-only ground truth for the same geometric reason mask-mode
+mAP@50 collapsed above, making a polygon-vs-box TIoU comparison structurally unfair here
+rather than informative; a fair TIoU comparison is possible on \texttt{syn-hw}, which has
+real polygon ground truth, once that run completes.}
+
+\begin{table}[H]
+\centering
+\footnotesize
+\caption{CLEval (character-level) cross-check, word task, BanglaWriting.}
+\begin{tabular}{@{}lrrr@{}}
+\toprule
+System & P & R & F1 \\
+\midrule
+\bnd{}         & 0.544 & \textbf{0.774} & 0.639 \\
+\textbf{Swin} & \textbf{0.852} & 0.752 & \textbf{0.799} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+CLEval's character-level F1 (0.639 \bnd{}, 0.799 Swin) tracks the split-merge headline
+F1 closely for both systems and preserves the same ranking -- independent confirmation,
+from an officially-maintained protocol with no dependence on this project's own matching
+code, that the headline numbers reflect real detection quality. \texttt{syn-hw}/BN-HTRd
+CLEval runs, and \texttt{syn-hw}'s polygon-vs-polygon TIoU run, are pending.
+
+\textbf{Resolving the confound}: \swin{} wins decisively on its own synthetic training
+domain, \bnd{} and \swin{} are near parity on BN-HTRd (\bnd's home turf), and on the
+one corpus foreign to \emph{both}, \swin{} wins again by a smaller but real margin.
+The most defensible summary: \swin{} is the stronger raw word detector by F1 in two of
+three conditions, including the unconfounded one, but this advantage narrows away
+from its own training distribution and never extends to mask-mode mAP on real,
+non-synthetic ground truth, where the rectangle-vs-polygon geometric penalty
+dominates regardless of dataset.
+
+\section{Discussion}
+
+\textbf{(0)} Neither home-turf dataset alone is a neutral referee -- Part III exists
+precisely to avoid averaging two biased numbers. \textbf{(1)} Matching strategy
+materially changes \bnd's own reported scores (word F1 understated by $\sim$20 points
+under strict matching); its own paper's headline 99.97\%/98\% figures are themselves
+manually adjudicated, not automated, complicating any comparison to automated
+protocols including ours. \textbf{(2)} The mAP@75 result is a caution against a single
+headline metric across systems with different native output geometries, as
+Tightness-Aware IoU \cite{liu2019tiou} argues generally. \textbf{(3)} The real-BN-HTRd
+ranking reversal is a genuine, deployment-relevant synthetic-to-real domain gap for
+\swin{}, not yet closed by fine-tuning. \textbf{(4)} BanglaWriting shows this gap is
+tied to BN-HTRd's specific capture conditions (or the line task specifically), not
+broad evidence \swin{} is worse at handwriting detection once training-domain
+advantage is removed -- on a third, differently-captured real corpus it is not.
+\textbf{(5)} The same neutral corpus reproduces the mAP@75 artifact independently and
+\emph{more severely}, confirming it as a general property of comparing polygon output
+to rectangle ground truth.
+
+\section{Conclusion}
+
+On synthetic \texttt{syn-hw} data (our training domain), \swin{} beats \bnd{}
+decisively on every fair metric. On real BN-HTRd (\bnd's training domain), the
+ranking reverses on lines and narrows to a near-tie on words. On BanglaWriting,
+ground neither system trained on, \swin{} still wins word-task F1 (0.770 vs.\ 0.674).
+\textbf{The honest summary is dataset-conditional, not a single winner}: each system
+looks strongest on its own training domain, and \swin{} remains the stronger raw word
+detector on the one dataset built to be unbiased toward either. \bnd's edge on
+mask-mode mAP@75 is a rectangle-vs-polygon geometric artifact, independently
+confirmed via pixel-level analysis, not a real detection-quality gap.
+
+{\footnotesize
+\begin{thebibliography}{99}
+\setlength{\itemsep}{0.05em}
+
+\bibitem{wolf2006detEval} C. Wolf and J.-M. Jolion, ``Object count/area graphs for the evaluation of object detection and segmentation algorithms,'' \emph{IJDAR}, vol. 8, no. 4, pp. 280--296, 2006.
+\bibitem{shahab2011icdar2011} A. Shahab, F. Shafait, and A. Dengel, ``ICDAR 2011 Robust Reading Competition Challenge 2,'' \emph{Proc. ICDAR}, 2011, pp. 1491--1496.
+\bibitem{karatzas2013icdar2013} D. Karatzas \emph{et al.}, ``ICDAR 2013 Robust Reading Competition,'' \emph{Proc. ICDAR}, 2013, pp. 1484--1493.
+\bibitem{karatzas2015icdar2015} D. Karatzas \emph{et al.}, ``ICDAR 2015 Competition on Robust Reading,'' \emph{Proc. ICDAR}, 2015, pp. 1156--1160.
+\bibitem{chng2017totaltext} C. K. Ch'ng and C. S. Chan, ``Total-Text,'' \emph{Proc. ICDAR}, 2017, pp. 935--942.
+\bibitem{chng2020totaltext} C. K. Ch'ng, C. S. Chan, and C.-L. Liu, ``Total-Text: Toward Orientation Robustness,'' \emph{IJDAR}, vol. 23, pp. 31--52, 2020.
+\bibitem{liu2019tiou} Y. Liu \emph{et al.}, ``Tightness-Aware Evaluation Protocol for Scene Text Detection,'' \emph{Proc. CVPR}, 2019.
+\bibitem{baek2020cleval} Y. Baek \emph{et al.}, ``CLEval: Character-Level Evaluation for Text Detection and Recognition Tasks,'' \emph{Proc. CVPRW}, 2020.
+\bibitem{lin2014coco} T.-Y. Lin \emph{et al.}, ``Microsoft COCO,'' \emph{Proc. ECCV}, LNCS vol. 8693, 2014, pp. 740--755.
+\bibitem{simistira2017divahisdb} F. Simistira \emph{et al.}, ``ICDAR2017 Competition on Layout Analysis for Challenging Medieval Manuscripts,'' \emph{Proc. ICDAR}, 2017.
+\bibitem{zhong2019publaynet} X. Zhong, J. Tang, and A. Jimeno Yepes, ``PubLayNet,'' \emph{Proc. ICDAR}, 2019, pp. 1015--1022.
+\bibitem{pfitzmann2022doclaynet} B. Pfitzmann \emph{et al.}, ``DocLayNet,'' \emph{Proc. KDD}, 2022, pp. 3743--3751.
+\bibitem{jaume2019funsd} G. Jaume, H. K. Ekenel, and J.-P. Thiran, ``FUNSD,'' \emph{Proc. ICDAR-OST}, 2019.
+\bibitem{rahman2022bnhtrd} Md. A. Rahman \emph{et al.}, ``BN-HTRd,'' \emph{arXiv:2206.08977}, 2022.
+\bibitem{jubaer2023bndrishti} S. M. Jubaer \emph{et al.}, ``BN-DRISHTI,'' \emph{ICDAR 2023 Workshops}, LNCS vol. 14193, Springer, 2023, pp. 186--202.
+\bibitem{mridha2021banglawriting} M. F. Mridha \emph{et al.}, ``BanglaWriting: A Multi-Purpose Offline Bangla Handwriting Dataset,'' \emph{Data in Brief}, vol. 34, 106633, 2021.
+\bibitem{obaidullah2018phdindic11} Sk. Md. Obaidullah \emph{et al.}, ``PHDIndic\_11,'' \emph{Multimedia Tools and Applications}, vol. 77, pp. 1643--1678, 2018.
+\bibitem{liu2021swintransformer} Z. Liu \emph{et al.}, ``Swin Transformer,'' \emph{Proc. ICCV}, 2021, pp. 10012--10022.
+\bibitem{he2017maskrcnn} K. He \emph{et al.}, ``Mask R-CNN,'' \emph{Proc. ICCV}, 2017, pp. 2961--2969.
+\bibitem{otsu1979threshold} N. Otsu, ``A Threshold Selection Method from Gray-Level Histograms,'' \emph{IEEE Trans. SMC}, vol. 9, no. 1, pp. 62--66, 1979.
+
+\end{thebibliography}
+}
+
+\end{document}
